@@ -1,15 +1,20 @@
 use clap::Parser;
-mod build;
-mod check;
-mod new;
-mod run;
-mod test;
 
-use build::{handle_build, BuildArgs};
-use check::{handle_check, CheckArgs};
-use new::{handle_new, NewArgs};
-use run::{handle_run, RunArgs};
-use test::{handle_test, TestArgs};
+mod adapters;
+mod build;
+mod clean;
+mod command;
+mod config;
+mod emulator;
+mod lint;
+mod project;
+mod setup;
+
+use crate::build::{handle_build, BuildArgs};
+use clean::{handle_clean, CleanArgs};
+use emulator::{handle_emulator, EmulatorArgs};
+use lint::{handle_lint, LintArgs};
+use setup::{handle_setup, SetupArgs};
 
 #[derive(Parser, Debug)]
 #[command(name = "heco")]
@@ -20,33 +25,32 @@ struct Cli {
 
 #[derive(Parser, Debug)]
 enum Commands {
-    New(NewArgs),
     Build(BuildArgs),
-    Run(RunArgs),
-    Check(CheckArgs),
-    Test(TestArgs),
+    Clean(CleanArgs),
+    Setup(SetupArgs),
+    Lint(LintArgs),
+    Emulator(EmulatorArgs),
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::New(args) => {
-            handle_new(args);
-        }
         Commands::Build(args) => {
             handle_build(args);
         }
-        Commands::Run(args) => {
-            handle_run(args);
+        Commands::Clean(args) => {
+            handle_clean(args);
         }
-        Commands::Check(args) => {
-            handle_check(args);
+        Commands::Setup(args) => {
+            handle_setup(args);
         }
-        Commands::Test(args) => {
-            handle_test(args);
+        Commands::Lint(args) => {
+            handle_lint(args)?;
+        }
+        Commands::Emulator(args) => {
+            handle_emulator(args)?;
         }
     }
-
     Ok(())
 }
