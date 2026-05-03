@@ -2,6 +2,7 @@ use crate::build::BuildArgs;
 use crate::clean::CleanArgs;
 use crate::command::CommandRunner;
 use crate::config::Config;
+use crate::progress::StatusBar;
 use crate::project::{ModuleType, load_project};
 use anstream::println;
 use owo_colors::OwoColorize;
@@ -49,136 +50,154 @@ fn parse_log_type(line: &str) -> Option<(LogType, String)> {
     None
 }
 
-/// 处理 hvigor 日志块的函数
-fn process_log_block(block: &[String], width: usize) {
-    if block.is_empty() {
-        return;
-    }
-
-    // 标记上一行是否是 Warning/Error，用于处理多行日志的缩进延续
-    let mut last_log_type: Option<LogType> = None;
-
-    // 处理每一行
-    for (i, line) in block.iter().enumerate() {
-        // 去掉颜色控制字符及其他 ANSI 转义序列
-        let mut processed_line = anstream::adapter::strip_str(line).to_string();
-
-        // 忽略空行
-        if processed_line.trim().is_empty() {
-            continue;
-        }
-
-        // 处理第一行（块的头部）
-        if i == 0 {
-            // 去掉 > hvigor 前缀
-            if processed_line.starts_with("> hvigor ") {
-                processed_line = processed_line
-                    .trim_start_matches("> hvigor")
-                    .trim_start()
-                    .to_string();
-            }
-        }
-
-        // 尝试解析当前行是否是 Warning 或 Error
-        if let Some((log_type, content)) = parse_log_type(&processed_line) {
-            last_log_type = Some(log_type);
-            match log_type {
-                LogType::Warning => {
-                    println!("{}: {}", "warning".yellow().bold(), content);
-                }
-                LogType::Error => {
-                    println!("{}: {}", "error".red().bold(), content);
-                }
-            }
-        } else {
-            // 如果当前行不是显式的 Warning/Error 前缀开头
-
-            // 如果这一行是以空白字符开头，且上一行是 Warning/Error，我们认为这是多行日志的延续
-            if line.starts_with(char::is_whitespace)
-                && let Some(log_type) = last_log_type
-            {
-                // 延续上一行的颜色风格，但保持其原有的缩进格式
-                match log_type {
-                    LogType::Warning => println!("{}", processed_line),
-                    LogType::Error => println!("{}", processed_line),
-                }
-                continue;
-            }
-
-            // 否则这是一个普通的日志行
-            last_log_type = None; // 断开延续状态
-
-            if i == 0 {
-                // 第一行，添加绿色的 hvigor: 前缀
-                println!(
-                    "{:>width$} {}",
-                    "hvigor".green().bold(),
-                    processed_line,
-                    width = width
-                );
-            } else {
-                // 后续行，直接打印原始信息
-                println!("{}", processed_line);
-            }
-        }
-    }
-}
-
 /// 运行命令并处理日志块
 fn run_command_with_log_handling(
     runner: &CommandRunner,
     node_path_str: &str,
     program_args: &[&str],
     width: usize,
+    bar: Option<&StatusBar>,
 ) -> anyhow::Result<()> {
-    // 维护日志块
-    let mut current_block = Vec::new();
+    // 追踪连续行的状态
+    let mut last_log_type: Option<LogType> = None;
+    let mut first_line = true;
+
     runner.run_with_handler(node_path_str, program_args, |line| {
-        // 检查是否是新的日志块开头
-        if line.trim().starts_with("> hvigor ") {
-            // 处理上一个日志块
-            if !current_block.is_empty() {
-                process_log_block(&current_block, width);
-                current_block.clear();
+        // 立即处理这一行
+        let mut processed_line = anstream::adapter::strip_str(line).to_string();
+
+        if processed_line.trim().is_empty() {
+            return;
+        }
+
+        // 如果是新块开头，重置为非延续状态，并去掉 "> hvigor " 前缀
+        let is_block_header = processed_line.trim().starts_with("> hvigor ");
+
+        if is_block_header {
+            processed_line = processed_line
+                .trim_start_matches("> hvigor ")
+                .trim_start()
+                .to_string();
+            last_log_type = None;
+        }
+
+        // 尝试解析为警告/错误
+        if let Some((log_type, content)) = parse_log_type(&processed_line) {
+            last_log_type = Some(log_type);
+            let output = match log_type {
+                LogType::Warning => format!("{}: {}", "warning".yellow().bold(), content),
+                LogType::Error => format!("{}: {}", "error".red().bold(), content),
+            };
+            if let Some(b) = bar {
+                b.println(&output);
+            } else {
+                println!("{}", output);
+            }
+        } else {
+            // 检查是否是延续行（以空白开头且上一行是警告/错误）
+            if line.starts_with(char::is_whitespace)
+                && let Some(_log_type) = last_log_type
+            {
+                // 延续，直接打印原始内容
+                if let Some(b) = bar {
+                    b.println(&processed_line);
+                } else {
+                    println!("{}", processed_line);
+                }
+            } else {
+                // 普通行，重置延续状态
+                last_log_type = None;
+
+                let output = if is_block_header || first_line {
+                    // 块的第一行，添加 hvigor 前缀
+                    first_line = false;
+                    format!(
+                        "{:>width$} {}",
+                        "hvigor".green().bold(),
+                        processed_line,
+                        width = width
+                    )
+                } else {
+                    // 普通延续行
+                    processed_line.clone()
+                };
+
+                if let Some(b) = bar {
+                    b.println(&output);
+                } else {
+                    println!("{}", output);
+                }
             }
         }
-        // 添加当前行到日志块
-        current_block.push(line.to_string());
     })?;
-    // 处理最后一个日志块
-    if !current_block.is_empty() {
-        process_log_block(&current_block, width);
-    }
+
     Ok(())
 }
 
 impl BuildArgs {
     pub fn to_command_args(&self, project_root: &PathBuf) -> anyhow::Result<Vec<String>> {
         let mut args = Vec::new();
+        let project = load_project()?;
+        if project.root != *project_root {
+            anyhow::bail!("project root mismatch");
+        }
 
-        if let Some(products) = &self.products {
+        // Handle product parameter
+        let product = if let Some(products) = &self.products {
+            if !products.is_empty() {
+                if self.modules.is_some() && products.len() > 1 {
+                    anyhow::bail!("only one product is allowed when using --modules parameter");
+                }
+                let p = &products[0];
+                project.validate_product(p)?;
+                Some(p)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if self.products.is_some() && self.modules.is_none() {
+            // Only products specified, use assembleApp
             args.push("assembleApp".to_string());
 
-            let project = load_project()?;
-            if project.root != *project_root {
-                anyhow::bail!("project root mismatch");
-            }
-
             // Since build.rs now handles loop logic, self.products should only contain exactly 1 product
-            if let Some(p) = products.first() {
-                project.validate_product(p)?;
+            if let Some(p) = product {
                 args.push("-p".to_string());
                 args.push(format!("product={}", p));
             }
-        } else {
-            let (module_name, target_name) = self.parse_module().unwrap_or((String::new(), None));
+        }
 
-            let mut tasks = resolve_tasks(&module_name, &target_name, project_root)?;
-            args.append(&mut tasks);
+        // Handle modules parameter (whether products are specified or not)
+        if self.modules.is_some() {
+            let parsed_modules = self.parse_modules().unwrap_or_default();
 
-            if let Some(module) = &self.module {
+            if parsed_modules.is_empty() {
+                let mut tasks = resolve_tasks("", &None, project_root)?;
+                args.append(&mut tasks);
+            } else {
+                let mut all_tasks = Vec::new();
+                let mut module_names = Vec::new();
+
+                for (module_name, target_name) in parsed_modules {
+                    let mut tasks = resolve_tasks(&module_name, &target_name, project_root)?;
+                    all_tasks.append(&mut tasks);
+                    module_names.push(module_name);
+                }
+
+                all_tasks.sort();
+                all_tasks.dedup();
+                args.append(&mut all_tasks);
+
                 args.push("-p".to_string());
-                args.push(format!("module={}", module));
+                args.push(format!("module={}", module_names.join(",")));
+            }
+
+            // Add product parameter if specified
+            if let Some(p) = product {
+                args.push("-p".to_string());
+                args.push(format!("product={}", p));
             }
         }
 
@@ -193,7 +212,13 @@ impl BuildArgs {
     }
 }
 
-pub fn sync(project_root: &Path, config: &Config, quiet: bool, width: usize) -> anyhow::Result<()> {
+pub fn sync(
+    project_root: &Path,
+    config: &Config,
+    quiet: bool,
+    width: usize,
+    bar: Option<&StatusBar>,
+) -> anyhow::Result<()> {
     let node_path = config
         .node_path()
         .ok_or_else(|| anyhow::anyhow!("未找到 Node 路径"))?;
@@ -253,7 +278,7 @@ pub fn sync(project_root: &Path, config: &Config, quiet: bool, width: usize) -> 
         }
         Ok(())
     } else {
-        run_command_with_log_handling(&runner, node_path_str, &program_args, width)
+        run_command_with_log_handling(&runner, node_path_str, &program_args, width, bar)
     }
 }
 
@@ -262,6 +287,7 @@ pub fn build(
     project_root: &PathBuf,
     config: &Config,
     width: usize,
+    bar: Option<&StatusBar>,
 ) -> anyhow::Result<()> {
     let node_path = config
         .node_path()
@@ -305,7 +331,7 @@ pub fn build(
         }
         Ok(())
     } else {
-        run_command_with_log_handling(&runner, node_path_str, &program_args, width)
+        run_command_with_log_handling(&runner, node_path_str, &program_args, width, bar)
     }
 }
 
@@ -380,6 +406,7 @@ pub fn clean(
     project_root: &Path,
     config: &Config,
     width: usize,
+    bar: Option<&StatusBar>,
 ) -> anyhow::Result<()> {
     let node_path = config
         .node_path()
@@ -416,6 +443,6 @@ pub fn clean(
         }
         Ok(())
     } else {
-        run_command_with_log_handling(&runner, node_path_str, &program_args, width)
+        run_command_with_log_handling(&runner, node_path_str, &program_args, width, bar)
     }
 }
